@@ -1,0 +1,10 @@
+---
+
+# Requirements used by ansible-galaxy tool
+#
+
+## Example
+#- name: ansible-bootstrap-system
+#  src: https://github.com/mgrzybek/ansible-bootstrap-system
+#  version: master
+
