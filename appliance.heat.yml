@@ -1,0 +1,368 @@
+heat_template_version: 2017-09-01
+
+description: Virtual appliance providing artifacts repositories using Nexus
+
+parameters:
+###############################################################################
+# Appliance building
+
+    image_id:
+        type: string
+        description: Glance image to use
+
+    node_net_id:
+        type: string
+        description: Network ID to use to connect the appliance
+
+    default_secgroup_id:
+        type: string
+        description: Default security group used by the appliance
+
+    flavor:
+        type: string
+        description: Appliance flavor
+
+###############################################################################
+# Openstack credencials
+
+    os_username:
+        type: string
+        description: Openstack username used by the appliance
+
+    os_password:
+        type: string
+        description: Openstack password used by the appliance
+        hidden: true
+
+    os_auth_url:
+        type: string
+        description: Keystone endpoint URL
+
+###############################################################################
+# Appliance credencials
+
+    appliance_admin_name:
+        type: string
+        description: Administrator username
+        default: administrateur
+
+    appliance_admin_password:
+        type: string
+        description: Administrator password
+        hidden: true
+
+###############################################################################
+# Gitops repository (post-configuration)
+
+    gitops_repo_url:
+        type: string
+        description: Git repository used for custom post-configuration of the appliance
+        default: https://github.com/139bercy/cloud-appliance-nexus-repo
+
+    gitops_repo_checkout:
+        type: string
+        description: branch/tag/commit
+        default: master
+
+    gitops_repo_username:
+        type: string
+        description: Secret
+        default:
+
+    gitops_repo_password:
+        type: string
+        description: Secret
+        hidden: true
+        default:
+        #constraints:
+        #    - length: { min: 6 }
+        #      description: Minimum length is 6
+
+###############################################################################
+# Git repository (bootstrap)
+
+    git_repo_url:
+        type: string
+        description: Git repository used for autoconf
+        default: https://github.com/139bercy/cloud-appliance-nexus-repo
+
+    git_repo_checkout:
+        type: string
+        description: branch/tag/commit
+        default: master
+
+    git_repo_username:
+        type: string
+        description: Secret
+        default:
+
+    git_repo_password:
+        type: string
+        description: Secret
+        hidden: true
+        default:
+        #constraints:
+        #    - length: { min: 6 }
+        #      description: Minimum length is 6
+
+###############################################################################
+# Internet
+
+    internet_http_proxy_url:
+        type: string
+        description: Internet proxy URL
+        default:
+
+    internet_http_no_proxy:
+        type: string
+        description: Domains and addresses ignored by proxy
+        default:
+
+    static_hosts:
+        type: json
+        description: JSON array of host:ip tuples
+        default:
+
+###############################################################################
+# Cinder
+
+    nexus_size_mb:
+        type: number
+        description: Nexus data volume size
+        default: 10
+
+    docker_size_mb:
+        type: number
+        description: Docker data volume size
+        default: 10
+
+resources:
+
+###############################################################################
+# cloud-init script
+
+    appliance_boot_script:
+        type: OS::Heat::SoftwareConfig
+        properties:
+            config:
+                str_replace:
+                    params:
+                        $os_password: { get_param: os_password }
+                        $os_username: { get_param: os_username }
+                        $os_auth_url: { get_param: os_auth_url }
+
+                        $appliance_admin_name: { get_param: appliance_admin_name}
+                        $appliance_admin_password: { get_param: appliance_admin_password }
+                        
+                        $gitops_repo_checkout: { get_param: gitops_repo_checkout }
+                        $gitops_repo_url: { get_param: gitops_repo_url }
+                        $gitops_repo_username: { get_param: gitops_repo_username }
+                        $gitops_repo_password: { get_param: gitops_repo_password }
+
+                        $git_repo_checkout: { get_param: git_repo_checkout }
+                        $git_repo_url: { get_param: git_repo_url }
+                        $git_repo_username: { get_param: git_repo_username }
+                        $git_repo_password: { get_param: git_repo_password }
+
+                        $internet_http_proxy_url: { get_param : internet_http_proxy_url }
+                        $internet_http_no_proxy: { get_param : internet_http_no_proxy }
+                        $static_hosts: { get_param: static_hosts }
+
+                    template: |
+                        #!/bin/bash
+                        set -x
+
+                        # Proxy
+                        if [ ! -z $internet_http_proxy_url ] ; then
+                            export HTTPS_PROXY=$internet_http_proxy_url
+                            export https_proxy=$internet_http_proxy_url
+                        fi
+                        if [ ! -z $internet_http_proxy_url ] ; then
+                            export HTTP_PROXY=$internet_http_proxy_url
+                            export http_proxy=$internet_http_proxy_url
+                        fi
+                        if [ ! -z $internet_http_no_proxy ] ; then
+                            export NO_PROXY=$internet_http_no_proxy
+                            export no_proxy=$internet_http_no_proxy
+                        fi
+                        export NO_PROXY=$NO_PROXY,127.0.0.1,0.0.0.0,localhost,169.254.169.254
+                        export no_proxy=$no_proxy,127.0.0.1,0.0.0.0,localhost,169.254.169.254
+
+                        # Install required packages to start git-ops-based auto-configuratiom
+                        if which yum > /dev/null 2>&1 ; then
+                            if [ ! -z "$HTTP_PROXY" ] ; then
+                                grep -q proxy= /etc/yum.conf || echo "proxy=$HTTP_PROXY" >> /etc/yum.conf
+                            fi
+
+                            yum install --assumeyes ansible git python-netaddr centos-release-openstack-rocky
+                            yum install --assumeyes python-urllib3 python2-openstackclient python2-heatclient jq
+                            
+                            export SSH_SERVICE=sshd
+                            
+                            # HACK: /run/cloud-init/instance-data.json not created by cloud-init
+                            if [ ! -f /run/cloud-init/instance-data.json ] ; then
+                               curl -s http://169.254.169.254/openstack/latest/meta_data.json | jq '.' > /run/cloud-init/instance-data.json
+                            fi
+                            # HACK
+                        else
+                            if [ ! -z "$HTTP_PROXY" ] ; then
+                                echo Acquire::http::Proxy \"$HTTP_PROXY\"\; > /etc/apt/apt.conf.d/99proxy
+                            fi
+
+                            apt update
+                            apt -y install ansible git python3-netaddr python3-openstackclient python3-heatclient jq
+                            export SSH_SERVICE=ssh
+                            
+                        fi
+
+                        # ENV variable ~ not defined by cloud-init: replaced by /root
+                        sed -i 's/~/\/root/' /etc/ansible/ansible.cfg
+                        sed -i 's/^#remote_tmp/remote_tmp/' /etc/ansible/ansible.cfg
+                        sed -i 's/^#local_tmp/remote_tmp/' /etc/ansible/ansible.cfg
+
+                        # DNS: Populate /etc/hosts
+                        if [ ! -z "$static_hosts" ] ; then
+                            echo $static_hosts > /tmp/static_hosts
+                            cat /tmp/static_hosts \
+                                | perl -pe 's/\[|\]|{|}//g' \
+                                | tr ',' '\n' \
+                                | awk -F: '{print $2,$1}' \
+                                | awk '{print $1,$2}' \
+                                >> /etc/hosts
+                        fi
+
+                        # Create local facts folder
+                        mkdir -p /etc/ansible/facts.d
+
+                        # Appliance credentials
+                        export APPLIANCE_ADMIN_NAME="$appliance_admin_name"
+                        export APPLIANCE_ADMIN_PASSWORD="$appliance_admin_password"
+
+                        # Openstack credentials
+                        export OS_AUTH_URL="$os_auth_url"
+                        export OS_PROJECT_ID=$(awk -F'"' '/project_id/ {print $4}' /run/cloud-init/instance-data.json)
+                        export OS_USER_DOMAIN_NAME="Default"
+                        export OS_USERNAME="$os_username"
+                        export OS_PASSWORD="$os_password"
+                        export OS_REGION_NAME="RegionOne"
+                        export OS_INTERFACE=public
+                        export OS_IDENTITY_API_VERSION=3
+
+                        # Detect cinder volumes
+                        export NEXUS_VOLUME=$(openstack volume list -f value \
+                            | awk '/nexus-cloud-appliance-nexus-repo/ {print $1}')
+
+                        export DOCKER_VOLUME=$(openstack volume list -f value \
+                            | awk '/docker-cloud-appliance-nexus-repo/ {print $1}')
+
+                        ########################################################
+                        # Download the playbook to bootstrap
+                        export REPO_PATH=/root/$(echo $git_repo_url | awk -F/ '{gsub(".git","");print $NF}')
+                        export ETC_PATH=$REPO_PATH/etc          
+
+                        if [ ! -z "$git_repo_username$git_repo_password" ] ; then
+                            auth_git_repo_url=$(echo $git_repo_url | awk -F// -v user=$git_repo_username  -v password=$git_repo_password '{print $1"//"user":"password"@"$2}')
+                            git clone -b $git_repo_checkout $auth_git_repo_url $REPO_PATH || exit 1
+                        else
+                            git clone -b $git_repo_checkout $git_repo_url $REPO_PATH || exit 1
+                        fi
+
+                        cd $REPO_PATH
+
+                        # Start autoconf
+                        ansible-galaxy install -r $ETC_PATH/ansible_requirements.yml
+                        . $REPO_PATH/autoconf.sh
+
+                        ########################################################
+                        # Download the post-configuration git repository
+                        if [ ! -z "$gitops_repo_url" ] ; then
+                            export REPO_PATH=/root/$(echo $gitops_repo_url | awk -F/ '{gsub(".git","");print $NF}')
+                            export ETC_PATH=$REPO_PATH/etc          
+
+                            if [ ! -z "$gitops_repo_username$gitops_repo_password" ] ; then
+                                auth_gitops_repo_url=$(echo $gitops_repo_url | awk -F// -v user=$gitops_repo_username  -v password=$gitops_repo_password '{print $1"//"user":"password"@"$2}')
+                                git clone -b $gitops_repo_checkout $auth_gitops_repo_url $REPO_PATH || exit 1
+                            else
+                                git clone -b $gitops_repo_checkout $gitops_repo_url $REPO_PATH || exit 1
+                            fi
+
+                            cd $REPO_PATH
+
+                            # Start autoconf
+                            # TODO: define the script to launch, for example $REPO_PATH/postconf.sh
+                        fi
+
+                        systemctl stop $SSH_SERVICE
+                        systemctl disable $SSH_SERVICE
+
+###############################################################################
+# Dedicated security group
+# TODO: set custom rules
+
+###############################################################################
+# Network port
+
+    appliance_front_port:
+        type: OS::Neutron::Port
+        properties:
+            network_id: { get_param: node_net_id }
+            security_groups: [
+                { get_param: default_secgroup_id }
+            ]
+#            security_groups: [
+#                { get_param: default_secgroup_id },
+#                { get_resource: appliance_secgroup }
+#            ]
+
+###############################################################################
+# Instance
+
+    appliance:
+        type: OS::Nova::Server
+        properties:
+            name: cloud-appliance-nexus-repo
+            image: { get_param: image_id }
+            flavor: { get_param: flavor }
+            networks:
+                - port: { get_resource: appliance_front_port }
+            metadata: {
+                group: appliance
+            }
+            user_data_format: SOFTWARE_CONFIG
+            user_data: { get_resource: appliance_boot_script }
+
+###############################################################################
+# Nexus
+
+    appliance_nexus_volume:
+        type: OS::Cinder::Volume
+        properties:
+            name: nexus-cloud-appliance-nexus-repo
+            size: { get_param: nexus_size_mb }
+
+    appliance_nexus_attachment:
+        type: OS::Cinder::VolumeAttachment
+        properties:
+            volume_id: { get_resource: appliance_nexus_volume }
+            instance_uuid: { get_resource: appliance }
+
+###############################################################################
+# Docker
+
+    appliance_docker_volume:
+        type: OS::Cinder::Volume
+        properties:
+            name: docker-cloud-appliance-nexus-repo
+            size: 3
+
+    appliance_docker_attachment:
+        type: OS::Cinder::VolumeAttachment
+        properties:
+            volume_id: { get_resource: appliance_docker_volume }
+            instance_uuid: { get_resource: appliance }
+
+###############################################################################
+# Outputs
+
+# TODO: do we need outputs?
+#outputs:
